@@ -1,0 +1,178 @@
+---
+title: "dataCleaning"
+author: "Logan Williams"
+date: "11/3/2023"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+#Load Dependencies
+```{r}
+library(dplyr)          #Tools for cleaning data
+library(here)           #File path management
+library(ggplot2)        #Data visualization
+library(sf)             #transform shapefile to lat long
+library(stringr)        #string manipulation
+library(lubridate)      #time date manipulation
+library(raster)         #saving shapefiles
+#install.packages("rgdal")
+#library(rgdal)          #read shapefiles
+library(ggpubr)
+library(conflicted)
+library(sp)
+library(shiny)
+library(leaflet)
+library(shinyWidgets)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::lag) #try stats if not
+```
+
+#Load Data
+```{r}
+daily <- read.csv("C:/Users/19148/Downloads/cleanedDailyTotals.csv")
+stops <- read.csv("C:/Users/19148/Downloads/CTA_-_System_Information_-_List_of__L__Stops_20231109.csv")
+weather <- read.csv("C:/Users/19148/Downloads/dayAverageChicagoWeather.csv")
+#load CTA train line shape file & transform to lat/long
+#load CTA train line shape file & transform to lat/long
+#lineShp <- st_read(here("C:/Users/19148/Downloads/CTA_RailLines.shp"))%>%
+ # st_transform('+proj=longlat +datum=WGS84')
+```
+
+
+```{r}
+#weather row names
+colnames(weather) <- c('date','maxTemp','minTemp','meanTemp','sumPrecip','sumSnow')
+#format dates
+daily$date = ymd(daily$date)
+#Decode dayType column
+daily$daytype[daily$daytype=="W"] <- "Weekday"
+daily$daytype[daily$daytype=="A"] <- "Saturday"
+daily$daytype[daily$daytype=="U"] <- "Sunday/Holiday"
+#create year, month, and day variables
+daily%>%
+  mutate(year = format(as.Date(daily$date, format="%d/%m/%Y"),"%Y"))%>%
+  mutate(month = format(as.Date(daily$date, format="%d/%m/%Y"),"%m"))%>%
+  mutate(day = format(as.Date(daily$date, format="%d/%m/%Y"),"%d"))
+
+#filter for 2022/2023
+daily <- daily[order(as.Date(daily$date, format="%m/%d/%Y")),]
+daily <- daily %>%
+  filter(date >= '2022-01-01')
+
+#cleaning weather dataset
+str(weather)
+weather$date <- substr(weather$date, 1, nchar(weather$date)-5)
+weather$date <- ymd(weather$date)
+
+#filter dataset
+weather <- weather %>%
+  filter(date <= '2023-06-30')
+
+#left join attempt
+joinedData <- left_join(daily, weather, by='date')
+#WOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+
+#Create station column
+stops$lineType<-qdapRegex::ex_between(stops$STATION_DESCRIPTIVE_NAME, "(",")")
+
+#Filter for only distinct stations
+stops%>%
+  distinct(MAP_ID, Location, lineType,STATION_DESCRIPTIVE_NAME)%>%
+  rename(station_id = MAP_ID)-> uniqueStops
+uniqueStops$station_id <- as.character(uniqueStops$station_id)
+splitLocation <- stringr::str_split_fixed(uniqueStops$Location, ", ",2)
+splitLocation <- as.data.frame(splitLocation)
+splitLocation$V1 <- str_sub(splitLocation$V1,2)
+splitLocation$V2 <- str_sub(splitLocation$V2,1,-2)
+
+splitLocation%>%
+  rename(Lat = V1)%>%
+  rename(Long = V2) -> geoStop
+#rejoin with train station data
+geoStopJoin <- bind_cols(uniqueStops, geoStop)
+conflicts_prefer(dplyr::select)
+geoStopJoin <- select(geoStopJoin, -Location)
+
+#convert lat/long to numeric
+geoStopJoin$Lat <- as.numeric(geoStopJoin$Lat)
+geoStopJoin$Long <- as.numeric(geoStopJoin$Long)
+joinedData$station_id = as.character(joinedData$station_id)
+totalDailyJoin <- left_join(joinedData, geoStopJoin)
+
+totalDailyJoin$lineType <- as.character(totalDailyJoin$lineType)
+
+#Create a variable that labels stations with multiple lines
+totalDailyJoin%>%
+  mutate(genLineType = ifelse(grepl(",", lineType), "Multiple Lines",
+                     ifelse(grepl("&", lineType), "Multiple Lines",
+                     ifelse(grepl("-", lineType), "Blue Line",
+                            lineType)))) -> totalDailyJoin
+#Do the same for our shapefile
+#lineShp%>%
+#  mutate(genLineType = ifelse(grepl("ML", LEGEND), "Multiple Lines",
+#                     ifelse(grepl("BL", LEGEND), "Blue Line",
+#                     ifelse(grepl("BR", LEGEND), "Brown Line",
+#                     ifelse(grepl("YL", LEGEND), "Yellow Line",
+#                     ifelse(grepl("GR", LEGEND), "Green Line",
+#                     ifelse(grepl("OR", LEGEND), "Orange Line",
+#                     ifelse(grepl("RD", LEGEND), "Red Line",
+#                     ifelse(grepl("PR", LEGEND), "Purple Line",
+#                     ifelse(grepl("PK", LEGEND), "Pink Line",
+#                            "NA")))))))))) -> lineShp
+
+
+```
+```{r}
+#remove scientific notation
+options(scipen=999)
+#exploratory scatterplot
+joinedData_grouped = joinedData %>% group_by(date, sumPrecip, daytype) %>% summarize(rides = sum(rides))
+joinedData_grouped$sumPrecip =as.numeric((joinedData_grouped$sumPrecip))
+
+p1 = ggplot(joinedData_grouped, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Rainy Days")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5))
+
+p1
+
+```
+
+
+```{r}
+#remove 0 precip
+joinedData_no0 = joinedData_grouped[joinedData_grouped$sumPrecip!= 0., ]
+joinedData_no0$sumPrecip = as.numeric(as.character(joinedData_no0$sumPrecip))
+#plot
+
+p2 = ggplot(joinedData_no0, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Rainy Days")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5))
+
+p2
+```
+
+```{r}
+#check for relationship on weekends
+joinedData_weekends = joinedData_grouped[joinedData_grouped$daytype!= "Weekday",]
+saturdayOnly = joinedData_weekends[joinedData_weekends$daytype!= "Sunday/Holiday",]
+saturdayOnly = saturdayOnly[saturdayOnly$sumPrecip != 0.0,]
+
+p3 = ggplot(joinedData_weekends, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Weekends")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5))
+
+saturdayPlot = ggplot(saturdayOnly, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Saturday")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5))
+
+p3 = ggplot(joinedData_weekends, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Weekends")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5))
+
+p3
+```
+```{r}
+joinedData_weekends_0 = joinedData_weekends[joinedData_weekends$sumPrecip!= "0", ]
+p4 = ggplot(joinedData_weekends_0, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Weekends")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5))
+
+
+p4
+
+joinedData_holiday_0 = joinedData_weekends_0[joinedData_weekends_0$daytype!= "Saturday", ]
+p5 = ggplot(joinedData_holiday_0, aes(x = sumPrecip,y=rides))+geom_point(size = 1) + geom_smooth(method=lm)+ggtitle("Ridership on Rainy Holidays")+xlab("Total Daily Rain") + ylab("Daily Rides") + theme(plot.title = element_text(hjust = .5)) 
+
+p5
+```
+
